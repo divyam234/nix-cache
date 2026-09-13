@@ -47,10 +47,10 @@ unavailable.
 
 The weekly and manually dispatched workflow builds the laptop, homelab,
 netcup, and standalone Home Manager closures from `divyam234/dotfiles`. It
-selects paths absent from both the previous index and `cache.nixos.org`, copies
-only those paths into a signed `file://` cache with `compression=none`, packs
-them, and publishes the draft release only after both architecture shards have
-been merged into a valid index.
+selects paths absent from both the previous index and `cache.nixos.org`, signs
+them, streams `nix nar pack` directly into raw chunks, and publishes the
+draft release only after both architecture shards have been merged into a
+valid index.
 
 Run tests with:
 

@@ -2,10 +2,13 @@ package pack
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -25,6 +28,26 @@ type Options struct {
 	DropFile      string
 	IndexName     string
 	ChunkSize     int64
+}
+
+type ExportOptions struct {
+	PathsFile     string
+	OutputDir     string
+	AssetBaseURL  string
+	Prefix        string
+	PublicKey     string
+	SigningKey    string
+	PreviousIndex string
+	IndexName     string
+	ChunkSize     int64
+}
+
+type pathInfo struct {
+	Deriver    *string  `json:"deriver"`
+	NarHash    string   `json:"narHash"`
+	NarSize    int64    `json:"narSize"`
+	References []string `json:"references"`
+	Signatures []string `json:"signatures"`
 }
 
 type chunkWriter struct {
@@ -139,6 +162,201 @@ func Run(options Options) (int, int, error) {
 		return added, skipped, err
 	}
 	return added, skipped, nil
+}
+
+func Export(options ExportOptions) (int, error) {
+	if options.ChunkSize <= 0 {
+		return 0, errors.New("chunk size must be positive")
+	}
+	if options.IndexName == "" {
+		options.IndexName = "index.json"
+	}
+	paths, err := readPathLines(options.PathsFile)
+	if err != nil {
+		return 0, err
+	}
+	if err := os.MkdirAll(options.OutputDir, 0o755); err != nil {
+		return 0, fmt.Errorf("create output directory: %w", err)
+	}
+	document, err := loadIndex(options.PreviousIndex, options.PublicKey)
+	if err != nil {
+		return 0, err
+	}
+	document.GeneratedAt = time.Now().UTC().Format(time.RFC3339)
+	if len(paths) == 0 {
+		return 0, writeDocument(filepath.Join(options.OutputDir, options.IndexName), document)
+	}
+	if err := signPaths(paths, options.SigningKey); err != nil {
+		return 0, err
+	}
+	metadata, err := queryPathInfo(paths)
+	if err != nil {
+		return 0, err
+	}
+	writer := &chunkWriter{
+		outputDir:    options.OutputDir,
+		prefix:       options.Prefix,
+		assetBaseURL: strings.TrimRight(options.AssetBaseURL, "/"),
+		chunkSize:    options.ChunkSize,
+		assets:       document.Assets,
+	}
+	added := 0
+	for _, path := range paths {
+		storeHash := storeHashFromPath(path)
+		if !cacheindex.ValidStoreHash(storeHash) {
+			return added, fmt.Errorf("invalid store path %q", path)
+		}
+		if _, exists := document.Paths[storeHash]; exists {
+			continue
+		}
+		info, exists := metadata[path]
+		if !exists {
+			return added, fmt.Errorf("nix path-info returned no metadata for %s", path)
+		}
+		if info.NarSize <= 0 || info.NarHash == "" {
+			return added, fmt.Errorf("nix path-info returned invalid NAR metadata for %s", path)
+		}
+		if !hasSignature(info.Signatures, options.PublicKey) {
+			return added, fmt.Errorf("%s is not signed by the configured cache key", path)
+		}
+		command := exec.Command("nix", "nar", "pack", path)
+		stdout, err := command.StdoutPipe()
+		if err != nil {
+			return added, fmt.Errorf("open NAR stream for %s: %w", path, err)
+		}
+		var standardError bytes.Buffer
+		command.Stderr = &standardError
+		if err := command.Start(); err != nil {
+			return added, fmt.Errorf("start NAR export for %s: %w", path, err)
+		}
+		extents, copyErr := writer.addReader(stdout, info.NarSize)
+		extra, extraErr := io.Copy(io.Discard, stdout)
+		waitErr := command.Wait()
+		if copyErr != nil {
+			return added, fmt.Errorf("export NAR for %s: %w", path, copyErr)
+		}
+		if extraErr != nil || extra != 0 {
+			return added, fmt.Errorf("NAR size mismatch for %s", path)
+		}
+		if waitErr != nil {
+			return added, fmt.Errorf("export NAR for %s: %w: %s", path, waitErr, strings.TrimSpace(standardError.String()))
+		}
+		document.Paths[storeHash] = cacheindex.PathEntry{
+			NarInfo: makeNarInfo(path, storeHash, info),
+			NAR: cacheindex.NAR{
+				Size:     info.NarSize,
+				FileHash: info.NarHash,
+				Extents:  extents,
+			},
+		}
+		added++
+	}
+	if err := writer.close(); err != nil {
+		return added, err
+	}
+	if err := document.Validate(""); err != nil {
+		return added, fmt.Errorf("validate generated index: %w", err)
+	}
+	return added, writeDocument(filepath.Join(options.OutputDir, options.IndexName), document)
+}
+
+func readPathLines(path string) ([]string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open paths file: %w", err)
+	}
+	defer file.Close()
+	var paths []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		value := strings.TrimSpace(scanner.Text())
+		if value != "" {
+			paths = append(paths, value)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read paths file: %w", err)
+	}
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func signPaths(paths []string, signingKey string) error {
+	command := exec.Command("nix", "store", "sign", "--stdin", "--key-file", signingKey)
+	command.Stdin = strings.NewReader(strings.Join(paths, "\n") + "\n")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("sign store paths: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func queryPathInfo(paths []string) (map[string]pathInfo, error) {
+	command := exec.Command("nix", "path-info", "--json", "--json-format", "1", "--sigs", "--stdin")
+	command.Stdin = strings.NewReader(strings.Join(paths, "\n") + "\n")
+	output, err := command.Output()
+	if err != nil {
+		if exitError, ok := err.(*exec.ExitError); ok {
+			return nil, fmt.Errorf("query path metadata: %w: %s", err, strings.TrimSpace(string(exitError.Stderr)))
+		}
+		return nil, fmt.Errorf("query path metadata: %w", err)
+	}
+	var metadata map[string]pathInfo
+	if err := json.Unmarshal(output, &metadata); err != nil {
+		return nil, fmt.Errorf("decode path metadata: %w", err)
+	}
+	return metadata, nil
+}
+
+func hasSignature(signatures []string, publicKey string) bool {
+	keyName, _, _ := strings.Cut(publicKey, ":")
+	for _, signature := range signatures {
+		if strings.HasPrefix(signature, keyName+":") {
+			return true
+		}
+	}
+	return false
+}
+
+func makeNarInfo(path, storeHash string, info pathInfo) string {
+	references := make([]string, 0, len(info.References))
+	for _, reference := range info.References {
+		references = append(references, filepath.Base(reference))
+	}
+	lines := []string{
+		"StorePath: " + path,
+		"URL: nar/" + storeHash + ".nar",
+		"Compression: none",
+		"FileHash: " + info.NarHash,
+		fmt.Sprintf("FileSize: %d", info.NarSize),
+		"NarHash: " + info.NarHash,
+		fmt.Sprintf("NarSize: %d", info.NarSize),
+		"References: " + strings.Join(references, " "),
+	}
+	if info.Deriver != nil {
+		lines = append(lines, "Deriver: "+filepath.Base(*info.Deriver))
+	}
+	for _, signature := range info.Signatures {
+		lines = append(lines, "Sig: "+signature)
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func storeHashFromPath(path string) string {
+	base := filepath.Base(path)
+	storeHash, _, _ := strings.Cut(base, "-")
+	return storeHash
+}
+
+func writeDocument(path string, document *cacheindex.Document) error {
+	if err := document.Validate(""); err != nil {
+		return fmt.Errorf("validate generated index: %w", err)
+	}
+	data, err := document.Marshal()
+	if err != nil {
+		return err
+	}
+	return writeAtomic(path, data)
 }
 
 func Merge(publicKey, output string, inputs []string) error {
@@ -285,6 +503,10 @@ func (writer *chunkWriter) add(path string, size int64) ([]cacheindex.Extent, er
 		return nil, fmt.Errorf("open NAR %s: %w", path, err)
 	}
 	defer input.Close()
+	return writer.addReader(input, size)
+}
+
+func (writer *chunkWriter) addReader(input io.Reader, size int64) ([]cacheindex.Extent, error) {
 	remaining := size
 	var extents []cacheindex.Extent
 	for remaining > 0 {
@@ -297,7 +519,7 @@ func (writer *chunkWriter) add(path string, size int64) ([]cacheindex.Extent, er
 		offset := writer.size
 		written, err := io.CopyN(writer.file, input, length)
 		if err != nil {
-			return nil, fmt.Errorf("copy NAR %s: %w", path, err)
+			return nil, fmt.Errorf("copy NAR stream: %w", err)
 		}
 		writer.size += written
 		remaining -= written

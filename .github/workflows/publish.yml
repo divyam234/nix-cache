@@ -74,30 +74,22 @@ jobs:
             --paths-file "$RUNNER_TEMP/closure-paths" \
             --previous-index "$RUNNER_TEMP/previous-index.json" \
             --output "$RUNNER_TEMP/selected-paths"
-      - name: Create signed raw file cache
+      - name: Export signed raw chunks
         env:
           CACHE_SIGNING_KEY: ${{ secrets.CACHE_SIGNING_KEY }}
         run: |
           install -m 0600 /dev/null "$RUNNER_TEMP/cache-key"
           printf '%s\n' "$CACHE_SIGNING_KEY" > "$RUNNER_TEMP/cache-key"
-          mkdir -p "$RUNNER_TEMP/file-cache"
-          mapfile -t selected < "$RUNNER_TEMP/selected-paths"
-          if [[ "${#selected[@]}" -gt 0 ]]; then
-            nix copy --no-recursive \
-              --to "file://$RUNNER_TEMP/file-cache?compression=none&secret-keys=$RUNNER_TEMP/cache-key" \
-              "${selected[@]}"
-          fi
-          rm -f "$RUNNER_TEMP/cache-key"
-      - name: Pack selected paths
-        run: |
-          "$RUNNER_TEMP/tool/bin/nix-cache" pack \
-            --cache-dir "$RUNNER_TEMP/file-cache" \
+          "$RUNNER_TEMP/tool/bin/nix-cache" export \
+            --paths-file "$RUNNER_TEMP/selected-paths" \
             --output "$RUNNER_TEMP/release" \
             --asset-base-url "https://github.com/$GITHUB_REPOSITORY/releases/download/$RELEASE_TAG" \
             --prefix "${{ matrix.prefix }}-$GITHUB_RUN_ATTEMPT" \
             --public-key "$CACHE_PUBLIC_KEY" \
+            --signing-key "$RUNNER_TEMP/cache-key" \
             --previous-index "$RUNNER_TEMP/previous-index.json" \
             --index-name "shard-${{ matrix.prefix }}.json"
+          rm -f "$RUNNER_TEMP/cache-key"
       - name: Upload chunks and shard index
         env:
           GH_TOKEN: ${{ github.token }}

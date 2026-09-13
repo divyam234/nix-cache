@@ -23,6 +23,8 @@ func main() {
 	switch os.Args[1] {
 	case "pack":
 		err = runPack(os.Args[2:])
+	case "export":
+		err = runExport(os.Args[2:])
 	case "merge":
 		err = runMerge(os.Args[2:])
 	case "filter-upstream":
@@ -38,8 +40,33 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: nix-cache <filter-upstream|pack|merge|serve> [options]")
+	fmt.Fprintln(os.Stderr, "usage: nix-cache <filter-upstream|export|pack|merge|serve> [options]")
 	os.Exit(2)
+}
+
+func runExport(arguments []string) error {
+	flags := flag.NewFlagSet("export", flag.ContinueOnError)
+	options := pack.ExportOptions{}
+	flags.StringVar(&options.PathsFile, "paths-file", "", "selected local store paths")
+	flags.StringVar(&options.OutputDir, "output", "", "output directory")
+	flags.StringVar(&options.AssetBaseURL, "asset-base-url", "", "immutable release asset URL prefix")
+	flags.StringVar(&options.Prefix, "prefix", "", "unique chunk name prefix")
+	flags.StringVar(&options.PublicKey, "public-key", "", "binary cache public key")
+	flags.StringVar(&options.SigningKey, "signing-key", "", "binary cache secret key file")
+	flags.StringVar(&options.PreviousIndex, "previous-index", "", "optional previous index")
+	flags.StringVar(&options.IndexName, "index-name", "index.json", "shard index filename")
+	flags.Int64Var(&options.ChunkSize, "chunk-size", 1024*1024*1024, "release chunk size in bytes")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if options.PathsFile == "" || options.OutputDir == "" || options.AssetBaseURL == "" || options.Prefix == "" || options.PublicKey == "" || options.SigningKey == "" {
+		return fmt.Errorf("paths-file, output, asset-base-url, prefix, public-key, and signing-key are required")
+	}
+	added, err := pack.Export(options)
+	if err == nil {
+		log.Printf("exported %d raw NARs", added)
+	}
+	return err
 }
 
 func runFilter(arguments []string) error {
