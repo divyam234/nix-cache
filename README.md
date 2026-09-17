@@ -23,8 +23,9 @@ the previous release remains available for clients refreshing an older index.
 
 The proxy downloads 32 MiB blocks with `Range`, requires a correct `206
 Partial Content` response, coalesces concurrent requests for the same block,
-resumes partial blocks, and keeps an LRU disk cache. Nix receives ordinary raw
-NAR streams with `Compression: none` and verifies them with:
+resumes partial blocks, prefetches one block ahead while Nix consumes the
+current block, and keeps an LRU disk cache. Nix receives ordinary raw NAR
+streams with `Compression: none` and verifies them with:
 
 ```text
 nix-cache-1:833kjCWb6yhgpaUIez65hOJBJUZDkns+ybXW/WJMsYI=
@@ -50,12 +51,15 @@ unavailable.
 After `divyam234/dotfiles` updates its flake inputs, it dispatches the
 `dotfiles-flake-updated` repository event with the new commit SHA. The publish
 workflow builds the laptop, homelab, netcup, and standalone Home Manager
-closures from that exact commit. It selects paths absent from
+closures from that exact commit. The latest generation is used as a local
+substituter to avoid rebuilding unchanged private paths, with a 512 MiB block
+cache on each runner. The workflow then selects all current paths absent from
 `cache.nixos.org`, signs them, streams `nix nar pack` directly into raw chunks,
 and publishes the draft release only after both architecture shards have been
 merged into a valid, self-contained index. After publication, releases older
-than the latest two cache generations are deleted. The workflow can also be
-dispatched manually, in which case it builds the current `dotfiles` main
+than the latest two cache generations are deleted. Releases referenced by a
+retained legacy index are preserved during migration. The workflow can also
+be dispatched manually, in which case it builds the current `dotfiles` main
 branch.
 
 The dotfiles workflow needs a fine-grained token with write access to this

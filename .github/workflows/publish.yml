@@ -63,15 +63,49 @@ jobs:
         env:
           TARGETS: ${{ matrix.targets }}
         run: |
+          nix build .#nix-cache --out-link "$RUNNER_TEMP/tool"
+          nix_options=()
+          index_url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/index.json"
+          if curl --fail --location --silent --show-error "$index_url" --output /dev/null; then
+            mkdir -p "$RUNNER_TEMP/previous-cache/blocks"
+            "$RUNNER_TEMP/tool/bin/nix-cache" serve \
+              --index-url "$index_url" \
+              --index-cache "$RUNNER_TEMP/previous-cache/index.json" \
+              --asset-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/" \
+              --public-key "$CACHE_PUBLIC_KEY" \
+              --block-cache "$RUNNER_TEMP/previous-cache/blocks" \
+              --max-cache-size 536870912 \
+              > "$RUNNER_TEMP/previous-cache/proxy.log" 2>&1 &
+            proxy_pid=$!
+            trap 'kill "$proxy_pid" 2>/dev/null || true' EXIT
+            for _ in {1..30}; do
+              if curl --fail --silent http://127.0.0.1:7745/healthz > /dev/null; then
+                break
+              fi
+              if ! kill -0 "$proxy_pid" 2>/dev/null; then
+                printf 'Previous cache proxy exited during startup:\n'
+                cat "$RUNNER_TEMP/previous-cache/proxy.log"
+                exit 1
+              fi
+              sleep 1
+            done
+            curl --fail --silent http://127.0.0.1:7745/healthz > /dev/null
+            nix_options=(
+              --option extra-substituters http://127.0.0.1:7745
+              --option extra-trusted-public-keys "$CACHE_PUBLIC_KEY"
+            )
+          else
+            echo "No previous cache generation is available"
+          fi
+
           mapfile -t targets <<< "$TARGETS"
           installables=()
           for target in "${targets[@]}"; do
             [[ -n "$target" ]] && installables+=("./dotfiles#$target")
           done
-          nix build --no-link --print-out-paths "${installables[@]}" > "$RUNNER_TEMP/outputs"
+          nix build "${nix_options[@]}" --no-link --print-out-paths "${installables[@]}" > "$RUNNER_TEMP/outputs"
           mapfile -t outputs < "$RUNNER_TEMP/outputs"
           nix path-info --recursive "${outputs[@]}" > "$RUNNER_TEMP/closure-paths"
-          nix build .#nix-cache --out-link "$RUNNER_TEMP/tool"
           "$RUNNER_TEMP/tool/bin/nix-cache" filter-upstream \
             --paths-file "$RUNNER_TEMP/closure-paths" \
             --output "$RUNNER_TEMP/selected-paths"
@@ -125,23 +159,39 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          mapfile -t stale_tags < <(
-            # shellcheck disable=SC2016
-            gh release list --limit 1000 \
-              --json tagName,isDraft,publishedAt \
-              --jq '
-                map(select(.tagName | startswith("cache-"))) as $cache |
-                ($cache |
-                  map(select(.isDraft == false)) |
-                  sort_by(.publishedAt) |
-                  reverse |
-                  .[:2] |
-                  map(.tagName)) as $keep |
-                $cache[] |
-                select(.tagName as $tag | $keep | index($tag) | not) |
-                .tagName
-              '
+          releases=$(gh release list --limit 1000 --json tagName,isDraft,publishedAt)
+          mapfile -t retained_tags < <(
+            jq -r '
+              map(select(.isDraft == false and (.tagName | startswith("cache-")))) |
+              sort_by(.publishedAt) |
+              reverse |
+              .[:2][].tagName
+            ' <<< "$releases"
           )
-          for tag in "${stale_tags[@]}"; do
-            gh release delete "$tag" --cleanup-tag --yes
+          declare -A keep=()
+          cleanup_safe=true
+          mkdir -p "$RUNNER_TEMP/retained-indexes"
+          for tag in "${retained_tags[@]}"; do
+            keep["$tag"]=1
+            index="$RUNNER_TEMP/retained-indexes/$tag.json"
+            if ! gh release download "$tag" --pattern index.json --output "$index"; then
+              echo "Skipping cleanup because $tag/index.json could not be inspected"
+              cleanup_safe=false
+              break
+            fi
+            while IFS= read -r referenced_tag; do
+              [[ -n "$referenced_tag" ]] && keep["$referenced_tag"]=1
+            done < <(
+              jq -r '.assets[].url | split("/releases/download/")[1] | split("/")[0]' "$index" | sort -u
+            )
           done
+          if [[ "$cleanup_safe" != true ]]; then
+            exit 0
+          fi
+          while IFS= read -r tag; do
+            if [[ -z "${keep[$tag]+present}" ]]; then
+              gh release delete "$tag" --cleanup-tag --yes
+            fi
+          done < <(
+            jq -r '.[] | select(.tagName | startswith("cache-")) | .tagName' <<< "$releases"
+          )

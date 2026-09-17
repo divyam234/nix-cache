@@ -99,6 +99,15 @@ func (cache *BlockCache) Acquire(ctx context.Context, assetName string, asset ca
 	}
 }
 
+func (cache *BlockCache) Prefetch(assetName string, asset cacheindex.Asset, blockNumber int64) {
+	go func() {
+		file, err := cache.Acquire(context.Background(), assetName, asset, blockNumber)
+		if err == nil {
+			_ = file.Close()
+		}
+	}()
+}
+
 func openValidBlock(path string, expected int64) (*os.File, error) {
 	file, err := os.Open(path)
 	if err != nil {

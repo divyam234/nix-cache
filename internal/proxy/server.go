@@ -137,7 +137,7 @@ func (server *Server) serveNAR(response http.ResponseWriter, request *http.Reque
 		return
 	}
 	first := true
-	for _, extent := range path.NAR.Extents {
+	for extentIndex, extent := range path.NAR.Extents {
 		asset := document.Assets[extent.Asset]
 		remaining := extent.Length
 		position := extent.Offset
@@ -154,6 +154,16 @@ func (server *Server) serveNAR(response http.ResponseWriter, request *http.Reque
 					log.Printf("stream %s failed: %v", request.URL.Path, err)
 				}
 				return
+			}
+			if remaining > length {
+				nextPosition := position + length
+				server.blocks.Prefetch(extent.Asset, asset, nextPosition/server.config.BlockSize)
+			} else if extentIndex+1 < len(path.NAR.Extents) {
+				nextExtent := path.NAR.Extents[extentIndex+1]
+				nextBlock := nextExtent.Offset / server.config.BlockSize
+				if nextExtent.Asset != extent.Asset || nextBlock != blockNumber {
+					server.blocks.Prefetch(nextExtent.Asset, document.Assets[nextExtent.Asset], nextBlock)
+				}
 			}
 			_, err = block.Seek(offsetInBlock, io.SeekStart)
 			if err == nil {
