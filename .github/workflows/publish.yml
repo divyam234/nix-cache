@@ -38,12 +38,16 @@ jobs:
         include:
           - runner: ubuntu-latest
             prefix: x86-64
+            nix_extra_conf: |
+              extra-substituters = https://attic.xuyh0120.win/lantian
+              extra-trusted-public-keys = lantian:EeAUQ+W+6r7EtwnmYjeVwx5kOGEBpjlBfPlzGlTNvHc=
             targets: |
               nixosConfigurations.laptop.config.system.build.toplevel
               nixosConfigurations.homelab.config.system.build.toplevel
               homeConfigurations."bhunter@laptop".activationPackage
           - runner: ubuntu-24.04-arm
             prefix: aarch64
+            nix_extra_conf: ""
             targets: |
               nixosConfigurations.netcup.config.system.build.toplevel
     runs-on: ${{ matrix.runner }}
@@ -56,9 +60,7 @@ jobs:
           ref: ${{ github.event.client_payload.sha || 'main' }}
       - uses: DeterminateSystems/nix-installer-action@v20
         with:
-          extra-conf: |
-            extra-substituters = https://attic.xuyh0120.win/lantian
-            extra-trusted-public-keys = lantian:EeAUQ+W+6r7EtwnmYjeVwx5kOGEBpjlBfPlzGlTNvHc=
+          extra-conf: ${{ matrix.nix_extra_conf }}
       - name: Build closures
         env:
           TARGETS: ${{ matrix.targets }}
