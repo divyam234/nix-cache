@@ -2,8 +2,8 @@ name: publish
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "17 3 * * 0"
+  repository_dispatch:
+    types: [dotfiles-flake-updated]
 
 permissions:
   contents: write
@@ -53,6 +53,7 @@ jobs:
         with:
           repository: divyam234/dotfiles
           path: dotfiles
+          ref: ${{ github.event.client_payload.sha || 'main' }}
       - uses: DeterminateSystems/nix-installer-action@v20
         with:
           extra-conf: |
@@ -71,12 +72,8 @@ jobs:
           mapfile -t outputs < "$RUNNER_TEMP/outputs"
           nix path-info --recursive "${outputs[@]}" > "$RUNNER_TEMP/closure-paths"
           nix build .#nix-cache --out-link "$RUNNER_TEMP/tool"
-          curl --fail --location --silent --show-error \
-            "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/index.json" \
-            --output "$RUNNER_TEMP/previous-index.json" || rm -f "$RUNNER_TEMP/previous-index.json"
           "$RUNNER_TEMP/tool/bin/nix-cache" filter-upstream \
             --paths-file "$RUNNER_TEMP/closure-paths" \
-            --previous-index "$RUNNER_TEMP/previous-index.json" \
             --output "$RUNNER_TEMP/selected-paths"
       - name: Export signed raw chunks
         env:
@@ -91,7 +88,6 @@ jobs:
             --prefix "${{ matrix.prefix }}-$GITHUB_RUN_ATTEMPT" \
             --public-key "$CACHE_PUBLIC_KEY" \
             --signing-key "$RUNNER_TEMP/cache-key" \
-            --previous-index "$RUNNER_TEMP/previous-index.json" \
             --index-name "shard-${{ matrix.prefix }}.json"
           rm -f "$RUNNER_TEMP/cache-key"
       - name: Upload chunks and shard index
@@ -114,9 +110,6 @@ jobs:
         run: |
           nix build .#nix-cache --out-link "$RUNNER_TEMP/tool"
           mkdir -p "$RUNNER_TEMP/indexes"
-          curl --fail --location --silent --show-error \
-            "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/index.json" \
-            --output "$RUNNER_TEMP/indexes/00-previous.json" || rm -f "$RUNNER_TEMP/indexes/00-previous.json"
           gh release download "$RELEASE_TAG" --pattern 'shard-*.json' --dir "$RUNNER_TEMP/indexes"
           indexes=("$RUNNER_TEMP/indexes"/*.json)
           "$RUNNER_TEMP/tool/bin/nix-cache" merge \
@@ -128,3 +121,27 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release edit "$RELEASE_TAG" --draft=false --latest
+      - name: Retain two cache generations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t stale_tags < <(
+            # shellcheck disable=SC2016
+            gh release list --limit 1000 \
+              --json tagName,isDraft,publishedAt \
+              --jq '
+                map(select(.tagName | startswith("cache-"))) as $cache |
+                ($cache |
+                  map(select(.isDraft == false)) |
+                  sort_by(.publishedAt) |
+                  reverse |
+                  .[:2] |
+                  map(.tagName)) as $keep |
+                $cache[] |
+                select(.tagName as $tag | $keep | index($tag) | not) |
+                .tagName
+              '
+          )
+          for tag in "${stale_tags[@]}"; do
+            gh release delete "$tag" --cleanup-tag --yes
+          done
