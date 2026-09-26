@@ -74,7 +74,7 @@ jobs:
               --index-url "$index_url" \
               --index-cache "$RUNNER_TEMP/previous-cache/index.json" \
               --asset-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/" \
-              --public-key "$CACHE_PUBLIC_KEY"
+              --public-key "$CACHE_PUBLIC_KEY" \
               > "$RUNNER_TEMP/previous-cache/proxy.log" 2>&1 &
             proxy_pid=$!
             trap 'kill "$proxy_pid" 2>/dev/null || true' EXIT
