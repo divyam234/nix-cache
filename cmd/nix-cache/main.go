@@ -143,17 +143,14 @@ func runServe(arguments []string) error {
 	flags.StringVar(&config.IndexCache, "index-cache", "", "persistent index path")
 	flags.StringVar(&config.AssetURLPrefix, "asset-url-prefix", "", "allowed release asset URL prefix")
 	flags.StringVar(&config.PublicKey, "public-key", "", "expected binary cache public key")
-	flags.StringVar(&config.BlockDirectory, "block-cache", "", "persistent block cache directory")
-	flags.Int64Var(&config.BlockSize, "block-size", 32*1024*1024, "download block size in bytes")
-	flags.Int64Var(&config.MaxCacheSize, "max-cache-size", 20*1024*1024*1024, "maximum persistent block bytes; zero is unlimited")
 	flags.IntVar(&config.MaxDownloads, "max-downloads", 8, "maximum concurrent GitHub range requests")
 	flags.DurationVar(&config.RefreshEvery, "refresh-interval", time.Hour, "index refresh interval")
 	flags.DurationVar(&config.HTTPTimeout, "http-timeout", 5*time.Minute, "upstream request timeout")
 	if err := flags.Parse(arguments); err != nil {
 		return err
 	}
-	if config.IndexURL == "" || config.IndexCache == "" || config.AssetURLPrefix == "" || config.PublicKey == "" || config.BlockDirectory == "" {
-		return fmt.Errorf("index-url, index-cache, asset-url-prefix, public-key, and block-cache are required")
+	if config.IndexURL == "" || config.IndexCache == "" || config.AssetURLPrefix == "" || config.PublicKey == "" {
+		return fmt.Errorf("index-url, index-cache, asset-url-prefix, and public-key are required")
 	}
 	server, err := proxy.New(config)
 	if err != nil {

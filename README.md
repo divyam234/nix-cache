@@ -21,10 +21,11 @@ index.json
 latest complete release is exposed through GitHub's `releases/latest` URL, and
 the previous release remains available for clients refreshing an older index.
 
-The proxy downloads 32 MiB blocks with `Range`, requires a correct `206
-Partial Content` response, coalesces concurrent requests for the same block,
-resumes partial blocks, prefetches one block ahead while Nix consumes the
-current block, and keeps an LRU disk cache. Nix receives ordinary raw NAR
+The proxy streams each NAR extent with an offset-based `Range` request and
+requires a correct `206 Partial Content` response. It caches GitHub's redirected
+CDN URL in memory until shortly before its `se` expiry, so subsequent ranges
+do not need another GitHub redirect. It does not cache asset data on disk.
+Nix receives ordinary raw NAR
 streams with `Compression: none` and verifies them with:
 
 ```text
@@ -38,8 +39,7 @@ nix run github:divyam234/nix-cache -- serve \
   --index-url https://github.com/divyam234/nix-cache/releases/latest/download/index.json \
   --index-cache ./state/index.json \
   --asset-url-prefix https://github.com/divyam234/nix-cache/releases/download/ \
-  --public-key 'nix-cache-1:833kjCWb6yhgpaUIez65hOJBJUZDkns+ybXW/WJMsYI=' \
-  --block-cache ./state/blocks
+  --public-key 'nix-cache-1:833kjCWb6yhgpaUIez65hOJBJUZDkns+ybXW/WJMsYI='
 ```
 
 Configure `http://127.0.0.1:7745` as a substituter and trust the public key
@@ -52,8 +52,7 @@ After `divyam234/dotfiles` updates its flake inputs, it dispatches the
 `dotfiles-flake-updated` repository event with the new commit SHA. The publish
 workflow builds the laptop, homelab, netcup, and standalone Home Manager
 closures from that exact commit. The latest generation is used as a local
-substituter to avoid rebuilding unchanged private paths, with a 512 MiB block
-cache on each runner. The workflow then selects all current paths absent from
+substituter to avoid rebuilding unchanged private paths. The workflow then selects all current paths absent from
 `cache.nixos.org`, signs them, streams `nix nar pack` directly into raw chunks,
 and publishes the draft release only after both architecture shards have been
 merged into a valid, self-contained index. After publication, releases older

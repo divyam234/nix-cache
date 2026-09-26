@@ -28,9 +28,6 @@ type Config struct {
 	IndexCache     string
 	AssetURLPrefix string
 	PublicKey      string
-	BlockDirectory string
-	BlockSize      int64
-	MaxCacheSize   int64
 	MaxDownloads   int
 	RefreshEvery   time.Duration
 	HTTPTimeout    time.Duration
@@ -49,7 +46,7 @@ type indexStore struct {
 type Server struct {
 	config Config
 	index  *indexStore
-	blocks *BlockCache
+	ranges *rangeSource
 	http   *http.Server
 }
 
@@ -59,7 +56,7 @@ func New(config Config) (*Server, error) {
 	transport.MaxIdleConnsPerHost = 16
 	transport.IdleConnTimeout = 90 * time.Second
 	client := &http.Client{Transport: transport, Timeout: config.HTTPTimeout}
-	blocks, err := NewBlockCache(config.BlockDirectory, config.BlockSize, config.MaxCacheSize, config.MaxDownloads, client)
+	ranges, err := newRangeSource(client, config.MaxDownloads)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +70,7 @@ func New(config Config) (*Server, error) {
 	if err := store.load(); err != nil {
 		return nil, err
 	}
-	server := &Server{config: config, index: store, blocks: blocks}
+	server := &Server{config: config, index: store, ranges: ranges}
 	server.http = &http.Server{
 		Addr:              config.Listen,
 		Handler:           server,
@@ -137,47 +134,19 @@ func (server *Server) serveNAR(response http.ResponseWriter, request *http.Reque
 		return
 	}
 	first := true
-	for extentIndex, extent := range path.NAR.Extents {
+	for _, extent := range path.NAR.Extents {
 		asset := document.Assets[extent.Asset]
-		remaining := extent.Length
-		position := extent.Offset
-		for remaining > 0 {
-			blockNumber := position / server.config.BlockSize
-			offsetInBlock := position % server.config.BlockSize
-			length := min(remaining, server.config.BlockSize-offsetInBlock)
-			block, err := server.blocks.Acquire(request.Context(), extent.Asset, asset, blockNumber)
-			if err != nil {
-				if first {
-					response.Header().Del("Content-Length")
-					http.Error(response, err.Error(), http.StatusBadGateway)
-				} else {
-					log.Printf("stream %s failed: %v", request.URL.Path, err)
-				}
-				return
-			}
-			if remaining > length {
-				nextPosition := position + length
-				server.blocks.Prefetch(extent.Asset, asset, nextPosition/server.config.BlockSize)
-			} else if extentIndex+1 < len(path.NAR.Extents) {
-				nextExtent := path.NAR.Extents[extentIndex+1]
-				nextBlock := nextExtent.Offset / server.config.BlockSize
-				if nextExtent.Asset != extent.Asset || nextBlock != blockNumber {
-					server.blocks.Prefetch(nextExtent.Asset, document.Assets[nextExtent.Asset], nextBlock)
-				}
-			}
-			_, err = block.Seek(offsetInBlock, io.SeekStart)
-			if err == nil {
-				_, err = io.CopyN(response, block, length)
-			}
-			block.Close()
-			if err != nil {
+		written, err := server.ranges.copy(request.Context(), response, asset.URL, extent.Offset, extent.Length, asset.Size)
+		if err != nil {
+			if first && written == 0 {
+				response.Header().Del("Content-Length")
+				http.Error(response, err.Error(), http.StatusBadGateway)
+			} else {
 				log.Printf("stream %s failed: %v", request.URL.Path, err)
-				return
 			}
-			first = false
-			position += length
-			remaining -= length
+			return
 		}
+		first = false
 	}
 }
 

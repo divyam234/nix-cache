@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,227 +17,96 @@ import (
 
 const testHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-func rangeServer(t *testing.T, data []byte, calls *atomic.Int64, ignoreRange bool) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		calls.Add(1)
-		if ignoreRange {
-			response.Header().Set("Content-Length", strconv.Itoa(len(data)))
-			_, _ = response.Write(data)
-			return
-		}
-		value := strings.TrimPrefix(request.Header.Get("Range"), "bytes=")
-		startText, endText, found := strings.Cut(value, "-")
-		if !found {
-			t.Errorf("invalid Range %q", value)
-			response.WriteHeader(http.StatusBadRequest)
-			return
-		}
-		start, _ := strconv.Atoi(startText)
-		end, _ := strconv.Atoi(endText)
-		body := data[start : end+1]
-		response.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
-		response.Header().Set("Content-Length", strconv.Itoa(len(body)))
-		response.WriteHeader(http.StatusPartialContent)
-		_, _ = response.Write(body)
-	}))
-}
-
-func TestBlockCacheCoalescesAndReusesDownloads(t *testing.T) {
-	var calls atomic.Int64
-	upstream := rangeServer(t, []byte("abcdefgh"), &calls, false)
-	defer upstream.Close()
-	cache, err := NewBlockCache(t.TempDir(), 4, 1024, 2, upstream.Client())
-	if err != nil {
-		t.Fatal(err)
-	}
-	asset := cacheindex.Asset{URL: upstream.URL, Size: 8}
-	first, err := cache.Acquire(context.Background(), "asset", asset, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	first.Close()
-	second, err := cache.Acquire(context.Background(), "asset", asset, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	second.Close()
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("got %d upstream calls, want 1", got)
-	}
-}
-
-func TestServerReconstructsNARAcrossAssetsAndBlocks(t *testing.T) {
-	var firstCalls, secondCalls atomic.Int64
-	first := rangeServer(t, []byte("abcde"), &firstCalls, false)
-	defer first.Close()
-	second := rangeServer(t, []byte("fghij"), &secondCalls, false)
-	defer second.Close()
-	blocks, err := NewBlockCache(t.TempDir(), 4, 1024, 2, &http.Client{Timeout: time.Second})
-	if err != nil {
-		t.Fatal(err)
-	}
-	document := testDocument(first.URL, second.URL)
-	server := &Server{
-		config: Config{BlockSize: 4},
-		index:  &indexStore{current: document},
-		blocks: blocks,
-	}
-	endpoint := httptest.NewServer(server)
-	defer endpoint.Close()
-
-	response, err := http.Get(endpoint.URL + "/nar/" + testHash + ".nar")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(response.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.StatusCode != http.StatusOK || string(body) != "cdefgh" {
-		t.Fatalf("got status %d body %q", response.StatusCode, body)
-	}
-
-	response, err = http.Get(endpoint.URL + "/nar/" + testHash + ".nar")
-	if err != nil {
-		t.Fatal(err)
-	}
-	response.Body.Close()
-	if firstCalls.Load() != 2 || secondCalls.Load() != 1 {
-		t.Fatalf("unexpected upstream calls: first=%d second=%d", firstCalls.Load(), secondCalls.Load())
-	}
-}
-
-func TestServerPrefetchesNextBlockWhileWritingCurrentBlock(t *testing.T) {
-	ranges := make(chan string, 2)
-	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		value := strings.TrimPrefix(request.Header.Get("Range"), "bytes=")
-		ranges <- value
+func TestRangeRedirectCacheAndNAR(t *testing.T) {
+	var redirects, downloads atomic.Int64
+	data := []byte("abcdefghij")
+	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		downloads.Add(1)
+		value := strings.TrimPrefix(r.Header.Get("Range"), "bytes=")
 		startText, endText, _ := strings.Cut(value, "-")
 		start, _ := strconv.Atoi(startText)
 		end, _ := strconv.Atoi(endText)
-		data := []byte("abcdefgh")
 		body := data[start : end+1]
-		response.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
-		response.Header().Set("Content-Length", strconv.Itoa(len(body)))
-		response.WriteHeader(http.StatusPartialContent)
-		_, _ = response.Write(body)
+		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", start, end, len(data)))
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write(body)
 	}))
-	defer upstream.Close()
-
-	blocks, err := NewBlockCache(t.TempDir(), 4, 1024, 2, upstream.Client())
+	defer cdn.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirects.Add(1)
+		http.Redirect(w, r, cdn.URL+"?se="+time.Now().Add(time.Minute).UTC().Format(time.RFC3339), http.StatusFound)
+	}))
+	defer origin.Close()
+	source, err := newRangeSource(origin.Client(), 2)
 	if err != nil {
 		t.Fatal(err)
 	}
 	document := &cacheindex.Document{
-		Assets: map[string]cacheindex.Asset{"one": {URL: upstream.URL, Size: 8}},
-		Paths: map[string]cacheindex.PathEntry{
-			testHash: {NAR: cacheindex.NAR{Size: 8, Extents: []cacheindex.Extent{{Asset: "one", Length: 8}}}},
-		},
+		Assets: map[string]cacheindex.Asset{"one": {URL: origin.URL, Size: 10}},
+		Paths:  map[string]cacheindex.PathEntry{testHash: {NAR: cacheindex.NAR{Size: 6, Extents: []cacheindex.Extent{{Asset: "one", Offset: 2, Length: 3}, {Asset: "one", Offset: 6, Length: 3}}}}},
 	}
-	server := &Server{config: Config{BlockSize: 4}, index: &indexStore{current: document}, blocks: blocks}
-	releaseWrite := make(chan struct{})
-	defer func() {
-		select {
-		case <-releaseWrite:
-		default:
-			close(releaseWrite)
+	server := httptest.NewServer(&Server{index: &indexStore{current: document}, ranges: source})
+	defer server.Close()
+	for range 2 {
+		response, err := http.Get(server.URL + "/nar/" + testHash + ".nar")
+		if err != nil {
+			t.Fatal(err)
 		}
-	}()
-	writer := &blockingResponseWriter{header: make(http.Header), writing: make(chan struct{}), release: releaseWrite}
-	done := make(chan struct{})
-	go func() {
-		server.ServeHTTP(writer, httptest.NewRequest(http.MethodGet, "/nar/"+testHash+".nar", nil))
-		close(done)
-	}()
-
-	if first := receive(t, ranges); first != "0-3" {
-		t.Fatalf("first range is %q, want 0-3", first)
+		body, err := io.ReadAll(response.Body)
+		response.Body.Close()
+		if err != nil || response.StatusCode != 200 || string(body) != "cdeghi" {
+			t.Fatalf("status %d body %q error %v", response.StatusCode, body, err)
+		}
 	}
-	receive(t, writer.writing)
-	if second := receive(t, ranges); second != "4-7" {
-		t.Fatalf("prefetched range is %q, want 4-7", second)
-	}
-	close(releaseWrite)
-	receive(t, done)
-	if got := writer.body.String(); got != "abcdefgh" {
-		t.Fatalf("got body %q, want abcdefgh", got)
+	if redirects.Load() != 1 || downloads.Load() != 4 {
+		t.Fatalf("redirects %d downloads %d", redirects.Load(), downloads.Load())
 	}
 }
 
-func TestServerRejectsIgnoredRange(t *testing.T) {
-	var calls atomic.Int64
-	upstream := rangeServer(t, []byte("abcde"), &calls, true)
+func TestExpiredRedirectRefreshes(t *testing.T) {
+	source, _ := newRangeSource(http.DefaultClient, 1)
+	source.redirects["origin"] = redirect{url: "cdn", expires: time.Now().Add(10 * time.Second)}
+	if source.cachedURL("origin") != "origin" {
+		t.Fatal("near-expired URL reused")
+	}
+}
+
+func TestIgnoredRangeRejected(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("abc")) }))
 	defer upstream.Close()
-	blocks, err := NewBlockCache(t.TempDir(), 4, 1024, 2, upstream.Client())
-	if err != nil {
+	source, _ := newRangeSource(upstream.Client(), 1)
+	_, err := source.open(context.Background(), upstream.URL, 0, 2, 3)
+	if err == nil {
+		t.Fatal("expected range rejection")
+	}
+}
+
+func TestRejectedCachedRedirectRefreshes(t *testing.T) {
+	var redirects atomic.Int64
+	stale := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer stale.Close()
+	cdn := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Range", "bytes 1-2/3")
+		w.Header().Set("Content-Length", "2")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("bc"))
+	}))
+	defer cdn.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirects.Add(1)
+		http.Redirect(w, r, cdn.URL+"?se="+time.Now().Add(time.Minute).UTC().Format(time.RFC3339), http.StatusFound)
+	}))
+	defer origin.Close()
+	source, _ := newRangeSource(origin.Client(), 1)
+	source.redirects[origin.URL] = redirect{url: stale.URL, expires: time.Now().Add(time.Minute)}
+	var output strings.Builder
+	if _, err := source.copy(context.Background(), &output, origin.URL, 1, 2, 3); err != nil {
 		t.Fatal(err)
 	}
-	document := testDocument(upstream.URL, upstream.URL)
-	server := &Server{config: Config{BlockSize: 4}, index: &indexStore{current: document}, blocks: blocks}
-	request := httptest.NewRequest(http.MethodGet, "/nar/"+testHash+".nar", nil)
-	recorder := httptest.NewRecorder()
-	server.ServeHTTP(recorder, request)
-	if recorder.Code != http.StatusBadGateway {
-		t.Fatalf("got status %d, want 502", recorder.Code)
-	}
-}
-
-func testDocument(firstURL, secondURL string) *cacheindex.Document {
-	return &cacheindex.Document{
-		Version:   cacheindex.Version,
-		StoreDir:  "/nix/store",
-		PublicKey: "cache:test",
-		Assets: map[string]cacheindex.Asset{
-			"one": {URL: firstURL, Size: 5},
-			"two": {URL: secondURL, Size: 5},
-		},
-		Paths: map[string]cacheindex.PathEntry{
-			testHash: {
-				NarInfo: "URL: nar/" + testHash + ".nar\nCompression: none\nFileSize: 6\nNarSize: 6\nSig: cache:fixture\n",
-				NAR: cacheindex.NAR{
-					Size: 6,
-					Extents: []cacheindex.Extent{
-						{Asset: "one", Offset: 2, Length: 3},
-						{Asset: "two", Offset: 0, Length: 3},
-					},
-				},
-			},
-		},
-	}
-}
-
-type blockingResponseWriter struct {
-	header  http.Header
-	body    strings.Builder
-	writing chan struct{}
-	release <-chan struct{}
-	once    sync.Once
-}
-
-func (writer *blockingResponseWriter) Header() http.Header {
-	return writer.header
-}
-
-func (writer *blockingResponseWriter) Write(data []byte) (int, error) {
-	writer.once.Do(func() {
-		close(writer.writing)
-		<-writer.release
-	})
-	return writer.body.Write(data)
-}
-
-func (writer *blockingResponseWriter) WriteHeader(_ int) {}
-
-func receive[T any](t *testing.T, values <-chan T) T {
-	t.Helper()
-	select {
-	case value := <-values:
-		return value
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for value")
-		var zero T
-		return zero
+	if output.String() != "bc" || redirects.Load() != 1 {
+		t.Fatalf("body %q redirects %d", output.String(), redirects.Load())
 	}
 }

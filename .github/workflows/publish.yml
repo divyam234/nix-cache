@@ -69,14 +69,12 @@ jobs:
           nix_options=()
           index_url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/index.json"
           if curl --fail --location --silent --show-error "$index_url" --output /dev/null; then
-            mkdir -p "$RUNNER_TEMP/previous-cache/blocks"
+            mkdir -p "$RUNNER_TEMP/previous-cache"
             "$RUNNER_TEMP/tool/bin/nix-cache" serve \
               --index-url "$index_url" \
               --index-cache "$RUNNER_TEMP/previous-cache/index.json" \
               --asset-url-prefix "https://github.com/$GITHUB_REPOSITORY/releases/download/" \
-              --public-key "$CACHE_PUBLIC_KEY" \
-              --block-cache "$RUNNER_TEMP/previous-cache/blocks" \
-              --max-cache-size 536870912 \
+              --public-key "$CACHE_PUBLIC_KEY"
               > "$RUNNER_TEMP/previous-cache/proxy.log" 2>&1 &
             proxy_pid=$!
             trap 'kill "$proxy_pid" 2>/dev/null || true' EXIT
