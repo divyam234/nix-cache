@@ -3,12 +3,24 @@
 let
   cfg = config.services.nix-cache;
   substituter = "http://127.0.0.1:${toString cfg.port}";
-  publicKey = "nix-cache-1:833kjCWb6yhgpaUIez65hOJBJUZDkns+ybXW/WJMsYI=";
-  releaseURL = "https://github.com/divyam234/nix-cache/releases";
+  releaseURL = "https://github.com/${cfg.repository}/releases";
 in
 {
   options.services.nix-cache = {
     enable = lib.mkEnableOption "GitHub Releases-backed Nix binary cache proxy";
+
+    repository = lib.mkOption {
+      type = lib.types.str;
+      default = "divyam234/nix-cache";
+      example = "my-user/my-cache";
+      description = "GitHub owner/repository hosting the cache releases.";
+    };
+
+    publicKey = lib.mkOption {
+      type = lib.types.str;
+      default = lib.removeSuffix "\n" (builtins.readFile ../public-key.txt);
+      description = "Public key used to verify cache signatures.";
+    };
 
     port = lib.mkOption {
       type = lib.types.port;
@@ -26,7 +38,7 @@ in
 
   config = lib.mkIf cfg.enable {
     nix.settings.substituters = [ substituter ];
-    nix.settings.trusted-public-keys = [ publicKey ];
+    nix.settings.trusted-public-keys = [ cfg.publicKey ];
 
     systemd.services.nix-cache-proxy = {
       description = "GitHub Releases-backed Nix binary cache proxy";
@@ -48,7 +60,7 @@ in
           "--asset-url-prefix"
           "${releaseURL}/download/"
           "--public-key"
-          publicKey
+          cfg.publicKey
           "--refresh-interval"
           cfg.refreshInterval
         ];

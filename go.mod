@@ -1,3 +1,3 @@
-module github.com/divyam234/nix-cache
+module nixcache
 
 go 1.25

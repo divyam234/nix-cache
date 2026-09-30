@@ -10,9 +10,9 @@ import (
 	"syscall"
 	"time"
 
-	cachefilter "github.com/divyam234/nix-cache/internal/filter"
-	"github.com/divyam234/nix-cache/internal/pack"
-	"github.com/divyam234/nix-cache/internal/proxy"
+	cachefilter "nixcache/internal/filter"
+	"nixcache/internal/pack"
+	"nixcache/internal/proxy"
 )
 
 func main() {

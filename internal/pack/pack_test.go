@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/divyam234/nix-cache/internal/cacheindex"
+	"nixcache/internal/cacheindex"
 )
 
 const testHash = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
