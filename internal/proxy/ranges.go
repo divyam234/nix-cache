@@ -69,7 +69,6 @@ func (source *rangeSource) open(ctx context.Context, origin string, start, lengt
 		}
 		request.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 		request.Header.Set("Accept-Encoding", "identity")
-		request.Header.Set("User-Agent", "nix-cache-proxy/1")
 		response, err := source.client.Do(request)
 		if err != nil {
 			return nil, fmt.Errorf("download range: %w", err)

@@ -40,13 +40,13 @@ in
     nix.settings.substituters = [ substituter ];
     nix.settings.trusted-public-keys = [ cfg.publicKey ];
 
-    systemd.services.nix-cache-proxy = {
+    systemd.services.nix-cache = {
       description = "GitHub Releases-backed Nix binary cache proxy";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {
-        CacheDirectory = "nix-cache-proxy";
+        CacheDirectory = "nix-cache";
         DynamicUser = true;
         ExecStart = lib.escapeShellArgs [
           "${self.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/nix-cache"
@@ -56,7 +56,7 @@ in
           "--index-url"
           "${releaseURL}/latest/download/index.json"
           "--index-cache"
-          "/var/cache/nix-cache-proxy/index.json"
+          "/var/cache/nix-cache/index.json"
           "--asset-url-prefix"
           "${releaseURL}/download/"
           "--public-key"
@@ -64,18 +64,8 @@ in
           "--refresh-interval"
           cfg.refreshInterval
         ];
-        LockPersonality = true;
-        MemoryDenyWriteExecute = true;
-        NoNewPrivileges = true;
-        PrivateTmp = true;
-        ProtectHome = true;
-        ProtectSystem = "strict";
         Restart = "on-failure";
         RestartSec = 30;
-        RestrictAddressFamilies = [
-          "AF_INET"
-          "AF_INET6"
-        ];
       };
     };
   };

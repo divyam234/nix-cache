@@ -27,7 +27,7 @@ Add the flake as an input and import its NixOS module:
 }
 ```
 
-The module starts `nix-cache-proxy` on `127.0.0.1:7745` and adds that URL and
+The module starts `nix-cache` on `127.0.0.1:7745` and adds that URL and
 this cache's public key to Nix's settings. To change the local port or how
 often the proxy checks for a new index:
 

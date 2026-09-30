@@ -189,7 +189,6 @@ func (store *indexStore) refresh() error {
 	if err != nil {
 		return fmt.Errorf("create index request: %w", err)
 	}
-	request.Header.Set("User-Agent", "nix-cache-proxy/1")
 	response, err := store.client.Do(request)
 	if err != nil {
 		return fmt.Errorf("download index: %w", err)

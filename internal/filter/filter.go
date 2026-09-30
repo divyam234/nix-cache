@@ -60,7 +60,6 @@ func Run(options Options) (Result, error) {
 			for item := range jobs {
 				request, err := http.NewRequestWithContext(context.Background(), http.MethodHead, strings.TrimRight(options.CacheURL, "/")+"/"+item.storeHash+".narinfo", nil)
 				if err == nil {
-					request.Header.Set("User-Agent", "nix-cache/1")
 					response, requestErr := client.Do(request)
 					if requestErr == nil {
 						response.Body.Close()
