@@ -168,9 +168,21 @@ jobs:
               .[:2][].tagName
             ' <<< "$releases"
           )
-          declare -A keep=()
+          declare -A keep=() releases_by_tag=() candidates=()
           cleanup_safe=true
           mkdir -p "$RUNNER_TEMP/retained-indexes"
+          while IFS= read -r tag; do
+            releases_by_tag["$tag"]=1
+            candidates["$tag"]=1
+          done < <(jq -r '.[] | select(.tagName | startswith("cache-")) | .tagName' <<< "$releases")
+          remote_tags=$(git ls-remote --tags --refs origin 'refs/tags/cache-*')
+          while IFS= read -r tag; do
+            [[ -n "$tag" ]] && candidates["${tag##*refs/tags/}"]=1
+          done <<< "$remote_tags"
+          # Never delete tags belonging to unfinished draft releases.
+          while IFS= read -r tag; do
+            keep["$tag"]=1
+          done < <(jq -r '.[] | select(.isDraft and (.tagName | startswith("cache-"))) | .tagName' <<< "$releases")
           for tag in "${retained_tags[@]}"; do
             keep["$tag"]=1
             index="$RUNNER_TEMP/retained-indexes/$tag.json"
@@ -188,10 +200,24 @@ jobs:
           if [[ "$cleanup_safe" != true ]]; then
             exit 0
           fi
-          while IFS= read -r tag; do
+          for tag in "${!candidates[@]}"; do
             if [[ -z "${keep[$tag]+present}" ]]; then
-              gh release delete "$tag" --cleanup-tag --yes
+              if [[ -n "${releases_by_tag[$tag]+present}" ]]; then
+                gh release delete "$tag" --yes
+              fi
+              status=$(curl --silent --show-error --output "$RUNNER_TEMP/delete-tag-response" \
+                --write-out '%{http_code}' --request DELETE \
+                --header "Authorization: Bearer $GH_TOKEN" \
+                --header 'Accept: application/vnd.github+json' \
+                "https://api.github.com/repos/$GITHUB_REPOSITORY/git/refs/tags/$tag")
+              case "$status" in
+                204) ;;
+                404) echo "Tag $tag was already absent" ;;
+                *)
+                  cat "$RUNNER_TEMP/delete-tag-response"
+                  echo "Failed to delete tag $tag (HTTP $status)" >&2
+                  exit 1
+                  ;;
+              esac
             fi
-          done < <(
-            jq -r '.[] | select(.tagName | startswith("cache-")) | .tagName' <<< "$releases"
-          )
+          done
