@@ -1,102 +1,93 @@
 # nix-cache
 
-This repository stores a signed Nix binary cache in immutable GitHub Release
-assets. Each release is a complete cache generation, and the latest two
-generations are retained. Raw, uncompressed NARs are concatenated into 1 GiB
-pack assets. A small local proxy translates the standard Nix binary-cache
-protocol into validated GitHub byte-range requests.
+A Nix binary cache hosted in GitHub Releases. Run the local proxy, then point
+Nix at it as a substituter. You do not need to run the publishing workflow to
+use the existing cache.
 
-## Layout
+## Use this cache
 
-Each published release contains:
+You need Nix with flakes enabled and network access to GitHub Releases. Start
+the proxy in a terminal (keep it running while you build):
 
-```text
-chunk-x86-64-1-0000.bin
-chunk-aarch64-1-0000.bin
-index.json
-```
-
-`index.json` contains signed narinfo text and maps each NAR to one or more
-`asset`, `offset`, and `length` extents. Releases and chunks are immutable. The
-latest complete release is exposed through GitHub's `releases/latest` URL, and
-the previous release remains available for clients refreshing an older index.
-
-The proxy streams each NAR extent with an offset-based `Range` request and
-requires a correct `206 Partial Content` response. It caches GitHub's redirected
-CDN URL in memory until shortly before its `se` expiry, so subsequent ranges
-do not need another GitHub redirect. It does not cache asset data on disk.
-Nix receives ordinary raw NAR
-streams with `Compression: none` and verifies them with:
-
-```text
-nix-cache-1:833kjCWb6yhgpaUIez65hOJBJUZDkns+ybXW/WJMsYI=
-```
-
-## Proxy
-
-```console
+```sh
 nix run github:divyam234/nix-cache -- serve \
   --index-url https://github.com/divyam234/nix-cache/releases/latest/download/index.json \
-  --index-cache ./state/index.json \
+  --index-cache "$HOME/.cache/nix-cache/index.json" \
   --asset-url-prefix https://github.com/divyam234/nix-cache/releases/download/ \
   --public-key 'nix-cache-1:833kjCWb6yhgpaUIez65hOJBJUZDkns+ybXW/WJMsYI='
 ```
 
-Configure `http://127.0.0.1:7745` as a substituter and trust the public key
-above. The proxy retains its last valid index if GitHub is temporarily
-unavailable.
+The proxy listens on `127.0.0.1:7745` by default. In another terminal, use it
+for a build:
 
-## Publishing
-
-After `divyam234/dotfiles` updates its flake inputs, it dispatches the
-`dotfiles-flake-updated` repository event with the new commit SHA. The publish
-workflow builds the laptop, homelab, netcup, and standalone Home Manager
-closures from that exact commit. The latest generation is used as a local
-substituter to avoid rebuilding unchanged private paths. The workflow then selects all current paths absent from
-`cache.nixos.org`, signs them, streams `nix nar pack` directly into raw chunks,
-and publishes the draft release only after both architecture shards have been
-merged into a valid, self-contained index. After publication, releases older
-than the latest two cache generations are deleted. Releases referenced by a
-retained legacy index are preserved during migration. The workflow can also
-be dispatched manually, in which case it builds the current `dotfiles` main
-branch.
-
-The dotfiles workflow needs a fine-grained token with write access to this
-repository stored as `NIX_CACHE_DISPATCH_TOKEN`. Its commit step should expose
-whether it created a commit and that commit's SHA, then dispatch only after a
-successful update:
-
-```yaml
-- name: Commit and push lock file
-  id: commit
-  run: |
-    if git diff --quiet -- flake.lock; then
-      echo "updated=false" >> "$GITHUB_OUTPUT"
-      exit 0
-    fi
-
-    git config user.name "github-actions[bot]"
-    git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-    git add flake.lock
-    git commit -m "chore: update flake inputs"
-    git push origin HEAD:main
-    echo "updated=true" >> "$GITHUB_OUTPUT"
-    echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-
-- name: Publish Nix cache
-  if: steps.commit.outputs.updated == 'true'
-  env:
-    GH_TOKEN: ${{ secrets.NIX_CACHE_DISPATCH_TOKEN }}
-    SOURCE_SHA: ${{ steps.commit.outputs.sha }}
-  run: |
-    gh api --method POST repos/divyam234/nix-cache/dispatches \
-      -f event_type=dotfiles-flake-updated \
-      -f "client_payload[sha]=$SOURCE_SHA"
+```sh
+nix build .#your-package \
+  --option extra-substituters http://127.0.0.1:7745 \
+  --option extra-trusted-public-keys 'nix-cache-1:833kjCWb6yhgpaUIez65hOJBJUZDkns+ybXW/WJMsYI='
 ```
 
-Run tests with:
+Replace `.#your-package` with your own installable. This cache only contains
+the closures published by this repository; it is not a general-purpose mirror
+of `cache.nixos.org`. An empty cache hit rate for unrelated packages is normal.
+If your Nix installation restricts substituter settings to trusted users,
+configure the URL and public key in your Nix daemon configuration instead.
 
-```console
+The proxy saves the last valid index at `--index-cache` and can use it when
+GitHub is temporarily unavailable. NAR data is streamed from release assets,
+not cached locally. Stop the proxy with Ctrl-C.
+
+## Publish your own cache
+
+Forking this repository is **not** enough to publish a working cache: the
+workflow currently builds specific outputs from `divyam234/dotfiles`. To adapt
+it:
+
+1. In `.github/workflows/publish.yml`, change the dotfiles checkout repository
+   and the `targets` for each architecture to outputs your flake actually
+   provides. Remove matrix entries for architectures you do not build. The
+   workflow can be started manually in Actions; without a dispatch SHA it
+   builds the source repository's `main` branch.
+2. Generate your own signing key and keep the secret private:
+
+   ```sh
+   nix key generate-secret --key-name my-cache-1 > cache-secret.key
+   nix key convert-secret-to-public < cache-secret.key
+   ```
+
+   Store the *entire contents* of `cache-secret.key` as the fork's Actions
+   secret `CACHE_SIGNING_KEY`. Do not commit the secret key. Replace
+   `CACHE_PUBLIC_KEY` in the workflow with the printed public key; use the same
+   public key when starting your proxy and configuring Nix. `public-key.txt`
+   and the example commands above contain **this repository's** key, not yours.
+3. Replace the repository-specific URLs in your proxy command with your fork's
+   Releases URLs. The workflow's `GITHUB_REPOSITORY`-based asset URLs already
+   follow the fork. Trigger the `publish` workflow manually and confirm that
+   its latest release contains `index.json` before using the fork as a cache.
+
+If another repository should publish automatically, give its workflow a token
+with permission to dispatch events to your fork and send a
+`dotfiles-flake-updated` repository dispatch with `client_payload.sha` set to
+the source commit to build. The sender must dispatch *after* pushing that
+commit. See `.github/workflows/publish.yml` for the expected event and build
+targets; there is no need to copy the example automation from this README.
+
+## How it works
+
+The workflow builds the configured closures, excludes paths already present
+in `cache.nixos.org`, and signs the remaining raw NARs. It packs them into
+chunks (up to 1 GiB each) and uploads per-architecture indexes to a draft
+release. After merging those indexes into `index.json`, it publishes the
+release. The proxy exposes standard Nix binary-cache endpoints and fetches
+NARs via validated byte-range requests to the immutable chunk assets.
+
+Cleanup keeps the two newest published cache generations and any older assets
+referenced by their indexes; it removes older releases and tags, including
+orphaned releases or tags. A cached index may outlive its release, so refresh
+the proxy after generations expire if downloads start returning 404.
+
+## Development
+
+```sh
 go test ./...
 nix flake check
 ```
