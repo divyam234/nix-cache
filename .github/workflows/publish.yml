@@ -179,10 +179,6 @@ jobs:
           while IFS= read -r tag; do
             [[ -n "$tag" ]] && candidates["${tag##*refs/tags/}"]=1
           done <<< "$remote_tags"
-          # Never delete tags belonging to unfinished draft releases.
-          while IFS= read -r tag; do
-            keep["$tag"]=1
-          done < <(jq -r '.[] | select(.isDraft and (.tagName | startswith("cache-"))) | .tagName' <<< "$releases")
           for tag in "${retained_tags[@]}"; do
             keep["$tag"]=1
             index="$RUNNER_TEMP/retained-indexes/$tag.json"
