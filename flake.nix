@@ -1,7 +1,7 @@
 {
   description = "GitHub Releases-backed Nix binary cache";
 
-  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+  inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
   outputs =
     { nixpkgs, self }:
@@ -12,6 +12,8 @@
       ];
     in
     {
+      nixosModules.default = import ./nix/module.nix { inherit self; };
+
       packages = eachSystem (
         system:
         let

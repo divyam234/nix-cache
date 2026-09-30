@@ -1,10 +1,46 @@
 # nix-cache
 
-A Nix binary cache hosted in GitHub Releases. Run the local proxy, then point
-Nix at it as a substituter. You do not need to run the publishing workflow to
-use the existing cache.
+A Nix binary cache hosted in GitHub Releases. On NixOS, enable the module to
+run the proxy and configure Nix automatically. You do not need to run the
+publishing workflow to use the existing cache.
 
 ## Use this cache
+
+Add the flake as an input and import its NixOS module:
+
+```nix
+{
+  inputs.nix-cache.url = "github:divyam234/nix-cache";
+
+  outputs = { nixpkgs, nix-cache, ... }: {
+    nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        nix-cache.nixosModules.default
+        ({ ... }: {
+          services.nix-cache.enable = true;
+        })
+        ./configuration.nix
+      ];
+    };
+  };
+}
+```
+
+The module starts `nix-cache-proxy` on `127.0.0.1:7745` and adds that URL and
+this cache's public key to Nix's settings. To change the local port or how
+often the proxy checks for a new index:
+
+```nix
+services.nix-cache.port = 7750;
+services.nix-cache.refreshInterval = "15m";
+```
+
+The port is used in both the systemd service and the Nix substituter. The
+refresh interval defaults to `1h` and uses Go duration syntax (for example,
+`30m` or `2h`).
+
+### Run it without the module
 
 You need Nix with flakes enabled and network access to GitHub Releases. Start
 the proxy in a terminal (keep it running while you build):
