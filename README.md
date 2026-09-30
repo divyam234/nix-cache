@@ -40,9 +40,9 @@ services.nix-cache.publicKey = "my-cache-1:YOUR_PUBLIC_KEY";
 
 The port is used in both the systemd service and the Nix substituter. The
 refresh interval defaults to `1h` and uses Go duration syntax (for example,
-`30m` or `2h`). The repository defaults to `divyam234/nix-cache`, and the public
-key defaults to this flake's `public-key.txt`. Set both options when using a
-different cache; release URLs are derived from the repository.
+`30m` or `2h`). The repository and public key default to this cache's values.
+Set both options when using a different cache; release URLs are derived from
+the repository.
 
 ### Run it without the module
 
@@ -99,10 +99,10 @@ workflow checks out `divyam234/dotfiles`. To adapt it:
    Store the *entire contents* of `cache-secret.key` as the fork's Actions
    secret `CACHE_SIGNING_KEY`. Do not commit the secret key. Replace
    `CACHE_PUBLIC_KEY` in the workflow with the printed public key; use the same
-   public key when starting your proxy and configuring Nix. Replace
-   `public-key.txt` in your fork to change the module's default, or set
-   `services.nix-cache.publicKey` explicitly. The example commands above
-   contain **this repository's** key, not yours.
+   public key when starting your proxy and configuring Nix. In your fork,
+   change the `services.nix-cache.publicKey` option's default or set the option
+   explicitly. The example commands above contain **this repository's** key,
+   not yours.
 3. Replace the repository-specific URLs in your proxy command with your fork's
    Releases URLs. The workflow's `GITHUB_REPOSITORY`-based asset URLs already
    follow the fork. Trigger the `publish` workflow manually and confirm that

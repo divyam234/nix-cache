@@ -18,7 +18,7 @@ in
 
     publicKey = lib.mkOption {
       type = lib.types.str;
-      default = lib.removeSuffix "\n" (builtins.readFile ../public-key.txt);
+      default = "nix-cache-1:833kjCWb6yhgpaUIez65hOJBJUZDkns+ybXW/WJMsYI=";
       description = "Public key used to verify cache signatures.";
     };
 
