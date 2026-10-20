@@ -72,9 +72,6 @@ jobs:
                              elif $system == "aarch64-linux" then "ubuntu-24.04-arm"
                              else error("No runner for " + $system) end),
                     prefix: (if $system == "x86_64-linux" then "x86-64" else "aarch64" end),
-                    nix_extra_conf: (if $system == "x86_64-linux" then
-                      "extra-substituters = https://attic.xuyh0120.win/lantian\nextra-trusted-public-keys = lantian:EeAUQ+W+6r7EtwnmYjeVwx5kOGEBpjlBfPlzGlTNvHc="
-                      else "" end),
                     targets: map(.target)
                   }
               )}
@@ -96,8 +93,6 @@ jobs:
           path: dotfiles
           ref: ${{ github.event.client_payload.sha || 'main' }}
       - uses: DeterminateSystems/nix-installer-action@v20
-        with:
-          extra-conf: ${{ matrix.nix_extra_conf }}
       - name: Build closures
         env:
           TARGETS_JSON: ${{ toJSON(matrix.targets) }}
