@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -41,6 +43,13 @@ type indexStore struct {
 	client      *http.Client
 	mu          sync.RWMutex
 	current     *cacheindex.Document
+	refreshMu   sync.Mutex
+}
+
+type RefreshResult struct {
+	SHA256      string `json:"sha256"`
+	GeneratedAt string `json:"generated_at"`
+	Paths       int    `json:"paths"`
 }
 
 type Server struct {
@@ -101,6 +110,8 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 		writeBytes(response, request, "text/x-nix-cache-info", []byte("StoreDir: /nix/store\nWantMassQuery: 1\nPriority: 30\n"))
 	case request.URL.Path == "/healthz":
 		writeBytes(response, request, "text/plain", []byte("ok\n"))
+	case request.URL.Path == "/-/refresh":
+		server.handleRefresh(response, request)
 	case narInfoPath.MatchString(request.URL.Path):
 		storeHash := narInfoPath.FindStringSubmatch(request.URL.Path)[1]
 		path, exists := server.index.get().Paths[storeHash]
@@ -121,6 +132,22 @@ func (server *Server) ServeHTTP(response http.ResponseWriter, request *http.Requ
 	default:
 		http.NotFound(response, request)
 	}
+}
+
+func (server *Server) handleRefresh(response http.ResponseWriter, request *http.Request) {
+	response.Header().Set("Cache-Control", "no-store")
+	if request.Method != http.MethodPost {
+		response.Header().Set("Allow", http.MethodPost)
+		http.Error(response, "use POST to refresh the index", http.StatusMethodNotAllowed)
+		return
+	}
+	result, err := server.index.refresh(request.Context())
+	if err != nil {
+		http.Error(response, "index refresh failed; retaining current index: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	response.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(response).Encode(result)
 }
 
 func (server *Server) serveNAR(response http.ResponseWriter, request *http.Request, document *cacheindex.Document, path cacheindex.PathEntry) {
@@ -164,7 +191,7 @@ func writeBytes(response http.ResponseWriter, request *http.Request, contentType
 }
 
 func (store *indexStore) load() error {
-	if err := store.refresh(); err == nil {
+	if _, err := store.refresh(context.Background()); err == nil {
 		return nil
 	} else {
 		log.Printf("remote index unavailable: %v", err)
@@ -184,57 +211,64 @@ func (store *indexStore) load() error {
 	return nil
 }
 
-func (store *indexStore) refresh() error {
-	request, err := http.NewRequest(http.MethodGet, store.url, nil)
+func (store *indexStore) refresh(ctx context.Context) (RefreshResult, error) {
+	// Manual and scheduled refreshes must publish in fetch order, not race.
+	store.refreshMu.Lock()
+	defer store.refreshMu.Unlock()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, store.url, nil)
 	if err != nil {
-		return fmt.Errorf("create index request: %w", err)
+		return RefreshResult{}, fmt.Errorf("create index request: %w", err)
 	}
 	response, err := store.client.Do(request)
 	if err != nil {
-		return fmt.Errorf("download index: %w", err)
+		return RefreshResult{}, fmt.Errorf("download index: %w", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("download index: status %d", response.StatusCode)
+		return RefreshResult{}, fmt.Errorf("download index: status %d", response.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, 128*1024*1024))
 	if err != nil {
-		return fmt.Errorf("read index: %w", err)
+		return RefreshResult{}, fmt.Errorf("read index: %w", err)
 	}
 	document, err := cacheindex.Parse(data, store.assetPrefix)
 	if err != nil {
-		return err
+		return RefreshResult{}, err
 	}
 	if document.PublicKey != store.publicKey {
-		return fmt.Errorf("remote index public key does not match configured key")
+		return RefreshResult{}, fmt.Errorf("remote index public key does not match configured key")
 	}
 	if err := os.MkdirAll(filepath.Dir(store.cacheFile), 0o750); err != nil {
-		return fmt.Errorf("create index cache directory: %w", err)
+		return RefreshResult{}, fmt.Errorf("create index cache directory: %w", err)
 	}
 	temporary, err := os.CreateTemp(filepath.Dir(store.cacheFile), ".index-*")
 	if err != nil {
-		return fmt.Errorf("create temporary index: %w", err)
+		return RefreshResult{}, fmt.Errorf("create temporary index: %w", err)
 	}
 	temporaryName := temporary.Name()
 	defer os.Remove(temporaryName)
 	if _, err := temporary.Write(data); err != nil {
 		temporary.Close()
-		return fmt.Errorf("write index: %w", err)
+		return RefreshResult{}, fmt.Errorf("write index: %w", err)
 	}
 	if err := temporary.Sync(); err != nil {
 		temporary.Close()
-		return fmt.Errorf("sync index: %w", err)
+		return RefreshResult{}, fmt.Errorf("sync index: %w", err)
 	}
 	if err := temporary.Close(); err != nil {
-		return fmt.Errorf("close index: %w", err)
+		return RefreshResult{}, fmt.Errorf("close index: %w", err)
 	}
 	if err := os.Rename(temporaryName, store.cacheFile); err != nil {
-		return fmt.Errorf("publish index: %w", err)
+		return RefreshResult{}, fmt.Errorf("publish index: %w", err)
 	}
 	store.mu.Lock()
 	store.current = document
 	store.mu.Unlock()
-	return nil
+	return RefreshResult{
+		SHA256:      fmt.Sprintf("%x", sha256.Sum256(data)),
+		GeneratedAt: document.GeneratedAt,
+		Paths:       len(document.Paths),
+	}, nil
 }
 
 func (store *indexStore) get() *cacheindex.Document {
@@ -251,7 +285,7 @@ func (server *Server) refresh(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := server.index.refresh(); err != nil {
+			if _, err := server.index.refresh(ctx); err != nil {
 				log.Printf("index refresh failed; retaining current index: %v", err)
 			}
 		}

@@ -76,6 +76,22 @@ The proxy saves the last valid index at `--index-cache` and can use it when
 GitHub is temporarily unavailable. NAR data is streamed from release assets,
 not cached locally. Stop the proxy with Ctrl-C.
 
+### Refresh the running proxy
+
+The proxy refreshes its index hourly by default. To fetch the latest index now,
+without restarting the service:
+
+```sh
+curl --fail-with-body -X POST http://127.0.0.1:7745/-/refresh
+```
+
+On success, the response is JSON with `sha256` (the downloaded index's content
+hash), `generated_at` (the index's publication timestamp), and `paths` (the number
+of indexed store paths). An unchanged index is still a successful refresh.
+The endpoint returns an error if downloading, validating, or saving the new
+index fails, and keeps the previous working index. It does not clear Nix's own
+client-side caches or change the published release.
+
 ## Publish your own cache
 
 Forking this repository is **not** enough to publish a working cache: the
