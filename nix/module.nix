@@ -47,7 +47,6 @@ in
       wantedBy = [ "multi-user.target" ];
       serviceConfig = {
         CacheDirectory = "nix-cache";
-        DynamicUser = true;
         ExecStart = lib.escapeShellArgs [
           "${self.packages.${pkgs.stdenv.hostPlatform.system}.default}/bin/nix-cache"
           "serve"
